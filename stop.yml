@@ -1,0 +1,29 @@
+- hosts: 127.0.0.1
+  connection: local
+  tasks:
+   - name: Deregister instances {{instance_id}}
+     local_action: ec2_elb
+     args:
+       aws_access_key: "{{aws_access_key}}"
+       aws_secret_key: "{{aws_secret_key}}"
+       ec2_elbs: "{{elb_name}}"
+       region: "{{region}}"
+       instance_id: "{{item}}"
+       validate_certs: no
+       enable_availability_zone: yes
+       wait: yes
+       state: absent
+     with_items: "{{instance_ids}}"
+     tags: oldelb
+   - pause:
+       minutes: "{{pause_time}}"
+   - name: Stop old instances {{instance_ids}}
+     ec2:
+       aws_access_key: "{{aws_access_key}}"
+       aws_secret_key: "{{aws_secret_key}}"
+       instance_ids: "{{item}}"
+       region: "{{region}}"
+       state: stopped
+       wait: yes
+     with_items: "{{instance_ids}}"
+     tags: stop
