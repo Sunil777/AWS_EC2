@@ -1,0 +1,134 @@
+ hosts: 127.0.0.1
+  connection: local
+  vars:
+     timeout: 1200
+     security_group: "{{ security_group }}"
+               
+     vpc_subnet_id: "{{ vpc_subnet_id }}"
+  tasks:
+  - name: Create AMI from Machine
+    ec2_ami:
+      aws_access_key: "{{aws_access_key}}"
+      aws_secret_key: "{{aws_secret_key}}"
+      instance_id: "{{instance_id}}"
+      region: "{{region}}"
+      no_reboot: yes
+      wait: yes
+      name: "{{server_type}}-{{lookup('pipe','date +%Y%m%d%H%M%S')}}"
+    register: image
+    tags: ami
+  - name: Launching servers with source image {{image.image_id}}
+    ec2:
+      aws_access_key: "{{aws_access_key}}"
+      aws_secret_key: "{{aws_secret_key}}"
+      keypair: "{{key_pair}}"
+      region: "{{region}}"
+      instance_type: "{{instance_type}}"
+      image: "{{image.image_id}}"
+      group: "{{security_group}}"
+      instance_tags:
+        group: "{{instance_tag_group}}"
+      count: "{{instance_count}}"
+      vpc_subnet_id: "{{item}}"
+      wait: yes  
+    with_items: "{{vpc_subnet_id}}" 
+    register: start_instance
+    tags: server
+  - set_fact:
+      instances: "{{ start_instance.results }}"
+  - name: Add dynamic host and variable
+    add_host:
+       name: "{{item.instances[0].private_ip}}"
+       groups: aws
+       ansible_ssh_user: "{{user}}"
+       ansible_ssh_pass: "{{passwd}}"
+       ansible_sudo_pass: "{{passwd}}"
+       ansible_ssh_port: "{{port}}"
+    with_items: "{{start_instance.results}}"
+  
+  - name: wait for the servers to appear on the DB
+    wait_for: host={{ item.instances[0].private_ip }} port=33000 delay=10 timeout=300 state=started
+    with_items: '{{instances}}'
+    tags: serverlive1
+- hosts: aws
+  vars:
+     
+     HOST:
+       - { host: 10.10.10.10, port: 6379}
+
+  tasks:
+   - name: Change hostname of servers
+    hostname: name={{ hostname.replace('*', ansible_all_ipv4_addresses[0].split('.')[3]) }}
+  - name: add to hosts
+    lineinfile: 
+      dest: /etc/hosts
+      regexp: '^127\.0\.0\.1[ \t]+localhost'
+      line: '127.0.0.1 localhost {{ hostname.replace("*", ansible_all_ipv4_addresses[0].split(".")[3]) }}'
+        
+      state: present
+  - name: add to hosts
+    shell:
+       sed -i 's/"{{server_ip}}"/"{{ansible_default_ipv4.address}}"/g' /etc/hosts 
+    sudo: yes
+  - name: Check whether entry is there
+    command: grep  "{{ansible_default_ipv4.address}}" /etc/hosts
+    register: checkmyconf
+    ignore_errors: True
+     
+  - name: chk telnet for DB
+    wait_for: host={{item.host}} port={{item.port}} delay=0 timeout=10 state=started
+    with_items: '{{ HOST }}'
+    tags: serverlive1
+  
+  - name: restart server
+    shell: reboot
+    async: 0
+    poll: 0 
+  
+  - name:  waiting for server to come back after reboot
+    local_action: wait_for host={{ ansible_ssh_host }} state=started
+- hosts: localhost
+  connection: local
+  vars:
+     server_port: "{{ healthcheck.port | default('80') }}"
+     api: "http://{{ item.instances[0].private_ip }}:{{server_port}}/{{ healthcheck.uri}}"
+     status_code: "{{healthcheck.status_code}}"
+     region: ap-south-1
+  tasks:
+  
+  - name: health check for servers
+    uri:
+      url: "{{api}}"         
+      method: "{{healthcheck.type}}"
+      return_content: yes
+      timeout: 50
+      status_code: "{{status_code}}"
+    with_items: '{{start_instance.results}}'
+    register: health
+    until: health|success
+    retries: 20
+    delay: 20
+    tags: heathcheck
+  
+  - action:
+      module: ec2_elb_facts
+      aws_access_key: "{{aws_access_key}}"
+      aws_secret_key: "{{aws_secret_key}}"
+      region: "{{region}}"
+      names: "{{elb_name}}"
+    register: elb_old_state
+    tags: elb
+  - name: Register instances
+    local_action: ec2_elb
+    args:
+      aws_access_key: "{{aws_access_key}}"
+      aws_secret_key: "{{aws_secret_key}}"
+      ec2_elbs: "{{elb_name}}"
+      region: "{{region}}"
+      instance_id: "{{item.instance_ids[0]}}"
+      validate_certs: no
+      enable_availability_zone: yes
+      wait: yes
+      state: present
+    register: elb_state
+    with_items: "{{instances}}"
