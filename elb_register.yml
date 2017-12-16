@@ -1,8 +1,7 @@
 - hosts: localhost
-  connection: local
- 
+  connection: local     
   tasks:
-   - name: Start the instances
+   - name: Start the instances for ids {{instance_ids}}
      ec2:
        aws_access_key: "{{aws_access_key}}"
        aws_secret_key: "{{aws_secret_key}}"
@@ -13,17 +12,50 @@
      with_items: "{{ instance_ids }}"
      register: start_instance
      tags: start
-   - pause:
-       minutes: 2
-
-    - action:
-        module: ec2_elb_facts
-        aws_access_key: "{{aws_access_key}}"
-        aws_secret_key: "{{aws_secret_key}}"
-        region: "{{region}}"
-        names: "{{elb_name}}"
-      register: elb_old_state
-      tags: elb
+   
+   - name: Add dynamic host and variable
+     add_host:
+        name: "{{item.instances[0].private_ip}}"
+        groups: aws
+        service: "{{webserver}}"
+        ansible_ssh_user: "{{user}}"
+        ansible_ssh_pass: "{{passwd}}"
+        ansible_sudo_pass: "{{passwd}}"
+        ansible_ssh_port: "{{port}}"
+     with_items: "{{start_instance.results}}"
+   - name: wait for the servers to appear on the network
+     wait_for: host={{ item.instances[0].private_ip }} port={{port}} delay=10 timeout=300 state=started connect_timeout=300
+     with_items: "{{start_instance.results}}"
+     tags: serverlive
+- hosts: aws 
+  vars_files:
+    - group_vars/all.yml
+  tasks:
+    - include: "webserver/{{webserver}}.yml"
+    - include: "server/{{healthcheck.server}}.yml"
+  
+- hosts: localhost
+  connection: local
+  
+  vars:
+     server_port: "{{ healthcheck.port | default('80') }}"
+     api: "http://{{ item.instances[0].private_ip }}:{{server_port}}/{{ healthcheck.uri}}"
+     status_code: "{{healthcheck.status_code}}"
+     region: ap-south-1
+  tasks:
+    - name: health check for servers
+      uri:
+        url: "{{api}}"         
+        method: "{{healthcheck.type}}"
+        return_content: yes
+        timeout: 50
+        status_code: "{{status_code}}"
+      with_items: '{{start_instance.results}}'
+      register: health
+      until: health|success
+      retries: 20
+      delay: 20
+      tags: heathcheck
     - name: Register instances {{instance_ids}}
       local_action: ec2_elb
       args:
