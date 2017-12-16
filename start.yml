@@ -1,0 +1,15 @@
+- hosts: localhost
+  connection: local
+  vars:
+    instance_ids: ["{{instance_id}}"]
+  tasks:
+  - name: Start the instances
+    ec2:
+      aws_access_key: "{{aws_access_key}}"
+      aws_secret_key: "{{aws_secret_key}}"
+      instance_ids: "{{ item }}"
+      region: "{{ region }}"
+      state: running
+      wait: true
+    with_items: "{{ instance_ids }}"
+    tags: start
